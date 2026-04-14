@@ -597,5 +597,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-PY
-python -m py_compile /mnt/data/loan_tape_optimizer_improved.py
