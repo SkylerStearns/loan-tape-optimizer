@@ -1,4 +1,3 @@
-bash -lc cat > /mnt/data/loan_tape_optimizer_improved.py <<'PY'
 import io
 import warnings
 import numpy as np
