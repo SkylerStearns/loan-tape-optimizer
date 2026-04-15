@@ -178,6 +178,65 @@ def detect_summary_rows(df: pd.DataFrame, loan_id_col: str | None) -> pd.Series:
     return mask
 
 
+def init_row_exclusions():
+    if "excluded_rows" not in st.session_state:
+        st.session_state.excluded_rows = set()
+
+
+def suggest_excluded_rows(raw_df: pd.DataFrame, loan_id_col: str | None = None) -> list[int]:
+    terms = ["average", "avg", "total", "summary", "pool", "grand total", "count"]
+
+    def looks_like_summary(value) -> bool:
+        text = "" if pd.isna(value) else str(value).strip().lower()
+        return any(term in text for term in terms)
+
+    mask = pd.Series(False, index=raw_df.index, dtype=bool)
+
+    if loan_id_col and loan_id_col in raw_df.columns:
+        mask = mask | raw_df[loan_id_col].apply(looks_like_summary)
+
+    return raw_df.loc[mask, "source_row"].tolist() if "source_row" in raw_df.columns else []
+
+
+def render_row_exclusion_manager(raw_df: pd.DataFrame, suggested_loan_id_col: str | None = None):
+    st.markdown('<div class="section-header">Row Exclusions</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="note-box">Exclude title rows, summary rows, average rows, totals, or any non-loan rows from the working tape. '
+        'This does not delete anything from the uploaded file.</div>',
+        unsafe_allow_html=True,
+    )
+
+    preview_cols = [c for c in ["source_row", suggested_loan_id_col, "buy_price", "fico", "ltv"] if c and c in raw_df.columns]
+    if len(preview_cols) <= 1:
+        preview_cols = ["source_row"] + [c for c in raw_df.columns if c != "source_row"][:4]
+
+    st.dataframe(raw_df[preview_cols], use_container_width=True, height=250)
+
+    c1, c2 = st.columns(2)
+    if c1.button("Auto-suggest summary rows"):
+        st.session_state.excluded_rows = set(suggest_excluded_rows(raw_df, suggested_loan_id_col))
+        st.rerun()
+
+    if c2.button("Clear row exclusions"):
+        st.session_state.excluded_rows = set()
+        st.rerun()
+
+    selected_rows = st.multiselect(
+        "Select source row numbers to exclude",
+        options=raw_df["source_row"].tolist(),
+        default=sorted(st.session_state.excluded_rows),
+    )
+
+    if st.button("Apply row exclusions"):
+        st.session_state.excluded_rows = set(selected_rows)
+        st.rerun()
+
+    if st.session_state.excluded_rows:
+        excluded_preview = raw_df[raw_df["source_row"].isin(st.session_state.excluded_rows)][preview_cols]
+        st.markdown("**Currently excluded rows**")
+        st.dataframe(excluded_preview, use_container_width=True, height=180)
+
+
 def clean_dataframe(df: pd.DataFrame, col_map: dict, remove_summary_rows: bool = True) -> tuple[pd.DataFrame, int]:
     rename = {v: k for k, v in col_map.items() if v}
     working = df.rename(columns=rename).copy()
@@ -792,7 +851,7 @@ def build_export(assigned_df: pd.DataFrame, templates: list[dict], analysis_mode
 
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         export_cols = [c for c in [
-            "loan_id", "assigned_pool", "buy_price", "fico", "ltv", "loan_amount",
+            "source_row", "loan_id", "assigned_pool", "buy_price", "fico", "ltv", "loan_amount",
             "product", "occupancy", "score", "fico_bucket", "ltv_bucket",
             "combined_bucket", "flag"
         ] if c in assigned_df.columns]
@@ -810,6 +869,7 @@ def build_export(assigned_df: pd.DataFrame, templates: list[dict], analysis_mode
 # -------------------------------------------------------------------
 def main():
     init_templates()
+    init_row_exclusions()
     settings = render_sidebar()
 
     if settings["uploaded"] is None:
@@ -831,7 +891,8 @@ def main():
         return
 
     try:
-        raw_df = load_excel(settings["uploaded"], settings["sheet"])
+        raw_df = load_excel(settings["uploaded"], settings["sheet"]).copy()
+        raw_df.insert(0, "source_row", range(1, len(raw_df) + 1))
     except Exception as e:
         st.error(f"Failed to load file: {e}")
         return
@@ -839,15 +900,19 @@ def main():
     st.markdown("### Raw Data Preview")
     st.dataframe(raw_df.head(10), use_container_width=True)
 
+    render_row_exclusion_manager(raw_df)
+
     col_map = render_column_mapping(raw_df)
     required = ["loan_id", "buy_price", "fico", "ltv"]
     if not all(col_map.get(k) for k in required):
         st.warning("Please map Loan ID, Buy Price, FICO, and LTV.")
         return
 
+    working_raw_df = raw_df[~raw_df["source_row"].isin(st.session_state.excluded_rows)].copy()
+
     try:
         cleaned_df, removed_count = clean_dataframe(
-            raw_df,
+            working_raw_df,
             col_map,
             remove_summary_rows=settings["remove_summary_rows"],
         )
@@ -864,6 +929,10 @@ def main():
         & (cleaned_df["ltv"] <= settings["max_ltv"])
         & (cleaned_df["buy_price"] >= settings["min_price"])
     ].copy()
+
+    manual_excluded_count = len(st.session_state.excluded_rows)
+    if manual_excluded_count > 0:
+        st.info(f"Manually excluded {manual_excluded_count:,} source rows before cleaning.")
 
     if removed_count > 0:
         st.info(f"Removed {removed_count:,} non-loan or incomplete rows during cleaning.")
