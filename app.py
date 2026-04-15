@@ -151,15 +151,29 @@ def normalize_ltv(series: pd.Series) -> pd.Series:
 
 
 def detect_summary_rows(df: pd.DataFrame, loan_id_col: str | None) -> pd.Series:
-    terms = ["average", "avg", "total", "count", "summary", "pool", "loans", "grand total"]
-    mask = pd.Series(False, index=df.index)
+    """
+    Detect likely non-loan summary rows such as:
+    Average, Avg, Total, Summary, Pool, Grand Total
 
-    if loan_id_col and loan_id_col in df.columns:
-        mask = mask | df[loan_id_col].astype(str).str.lower().apply(lambda x: any(t in x for t in terms))
+    Only checks the mapped loan ID column to avoid false positives
+    from numeric or mixed-type data elsewhere in the sheet.
+    """
+    terms = ["average", "avg", "total", "summary", "pool", "grand total"]
+    mask = pd.Series(False, index=df.index, dtype=bool)
 
-    object_cols = df.select_dtypes(include=["object"]).columns.tolist()
-    for col in object_cols[:6]:
-        mask = mask | df[col].astype(str).str.lower().apply(lambda x: any(t in x for t in terms))
+    if loan_id_col is None or loan_id_col not in df.columns:
+        return mask
+
+    loan_id_text = (
+        df[loan_id_col]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+
+    for term in terms:
+        mask = mask | loan_id_text.str.contains(term, na=False, regex=False)
 
     return mask
 
